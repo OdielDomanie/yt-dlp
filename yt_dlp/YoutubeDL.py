@@ -102,6 +102,7 @@ from .utils import (
     format_decimal_suffix,
     format_field,
     formatSeconds,
+    get_compatible_ext,
     get_domain,
     int_or_none,
     iri_to_uri,
@@ -134,6 +135,7 @@ from .utils import (
     timetuple_from_msec,
     to_high_limit_path,
     traverse_obj,
+    try_call,
     try_get,
     url_basename,
     variadic,
@@ -142,7 +144,7 @@ from .utils import (
     write_json_file,
     write_string,
 )
-from .version import RELEASE_GIT_HEAD, __version__
+from .version import RELEASE_GIT_HEAD, VARIANT, __version__
 
 if compat_os_name == 'nt':
     import ctypes
@@ -372,7 +374,7 @@ class YoutubeDL:
 
                        Progress hooks are guaranteed to be called at least twice
                        (with status "started" and "finished") if the processing is successful.
-    merge_output_format: Extension to use when merging formats.
+    merge_output_format: "/" separated list of extensions to use when merging formats.
     final_ext:         Expected final extension; used to detect when the file was
                        already downloaded and converted
     fixup:             Automatically correct known faults of the file.
@@ -525,7 +527,8 @@ class YoutubeDL:
     """
 
     _NUMERIC_FIELDS = {
-        'width', 'height', 'tbr', 'abr', 'asr', 'vbr', 'fps', 'filesize', 'filesize_approx',
+        'width', 'height', 'asr', 'audio_channels', 'fps',
+        'tbr', 'abr', 'vbr', 'filesize', 'filesize_approx',
         'timestamp', 'release_timestamp',
         'duration', 'view_count', 'like_count', 'dislike_count', 'repost_count',
         'average_rating', 'comment_count', 'age_limit',
@@ -537,7 +540,7 @@ class YoutubeDL:
     _format_fields = {
         # NB: Keep in sync with the docstring of extractor/common.py
         'url', 'manifest_url', 'manifest_stream_number', 'ext', 'format', 'format_id', 'format_note',
-        'width', 'height', 'resolution', 'dynamic_range', 'tbr', 'abr', 'acodec', 'asr',
+        'width', 'height', 'resolution', 'dynamic_range', 'tbr', 'abr', 'acodec', 'asr', 'audio_channels',
         'vbr', 'fps', 'vcodec', 'container', 'filesize', 'filesize_approx',
         'player_url', 'protocol', 'fragment_base_url', 'fragments', 'is_from_start',
         'preference', 'language', 'language_preference', 'quality', 'source_preference',
@@ -1794,6 +1797,8 @@ class YoutubeDL:
             })
 
             if self._match_entry(entry_copy, incomplete=True) is not None:
+                # For compatabilty with youtube-dl. See https://github.com/yt-dlp/yt-dlp/issues/4369
+                resolved_entries[i] = (playlist_index, NO_DEFAULT)
                 continue
 
             self.to_screen('[download] Downloading video %s of %s' % (
@@ -1814,7 +1819,8 @@ class YoutubeDL:
                 resolved_entries[i] = (playlist_index, entry_result)
 
         # Update with processed data
-        ie_result['requested_entries'], ie_result['entries'] = tuple(zip(*resolved_entries)) or ([], [])
+        ie_result['requested_entries'] = [i for i, e in resolved_entries if e is not NO_DEFAULT]
+        ie_result['entries'] = [e for _, e in resolved_entries if e is not NO_DEFAULT]
 
         # Write the updated info to json
         if _infojson_written is True and self._write_info_json(
@@ -2088,14 +2094,13 @@ class YoutubeDL:
             the_only_video = video_fmts[0] if len(video_fmts) == 1 else None
             the_only_audio = audio_fmts[0] if len(audio_fmts) == 1 else None
 
-            output_ext = self.params.get('merge_output_format')
-            if not output_ext:
-                if the_only_video:
-                    output_ext = the_only_video['ext']
-                elif the_only_audio and not video_fmts:
-                    output_ext = the_only_audio['ext']
-                else:
-                    output_ext = 'mkv'
+            output_ext = get_compatible_ext(
+                vcodecs=[f.get('vcodec') for f in video_fmts],
+                acodecs=[f.get('acodec') for f in audio_fmts],
+                vexts=[f['ext'] for f in video_fmts],
+                aexts=[f['ext'] for f in audio_fmts],
+                preferences=(try_call(lambda: self.params['merge_output_format'].split('/'))
+                             or self.params.get('prefer_free_formats') and ('webm', 'mkv')))
 
             filtered = lambda *keys: filter(None, (traverse_obj(fmt, *keys) for fmt in formats_info))
 
@@ -2128,6 +2133,7 @@ class YoutubeDL:
                     'acodec': the_only_audio.get('acodec'),
                     'abr': the_only_audio.get('abr'),
                     'asr': the_only_audio.get('asr'),
+                    'audio_channels': the_only_audio.get('audio_channels')
                 })
 
             return new_dict
@@ -3067,33 +3073,9 @@ class YoutubeDL:
                         return
 
                 if info_dict.get('requested_formats') is not None:
-
-                    def compatible_formats(formats):
-                        # TODO: some formats actually allow this (mkv, webm, ogg, mp4), but not all of them.
-                        video_formats = [format for format in formats if format.get('vcodec') != 'none']
-                        audio_formats = [format for format in formats if format.get('acodec') != 'none']
-                        if len(video_formats) > 2 or len(audio_formats) > 2:
-                            return False
-
-                        # Check extension
-                        exts = {format.get('ext') for format in formats}
-                        COMPATIBLE_EXTS = (
-                            {'mp3', 'mp4', 'm4a', 'm4p', 'm4b', 'm4r', 'm4v', 'ismv', 'isma'},
-                            {'webm'},
-                        )
-                        for ext_sets in COMPATIBLE_EXTS:
-                            if ext_sets.issuperset(exts):
-                                return True
-                        # TODO: Check acodec/vcodec
-                        return False
-
                     requested_formats = info_dict['requested_formats']
                     old_ext = info_dict['ext']
                     if self.params.get('merge_output_format') is None:
-                        if not compatible_formats(requested_formats):
-                            info_dict['ext'] = 'mkv'
-                            self.report_warning(
-                                'Requested formats are incompatible for merge and will be merged into mkv')
                         if (info_dict['ext'] == 'webm'
                                 and info_dict.get('thumbnails')
                                 # check with type instead of pp_key, __name__, or isinstance
@@ -3592,6 +3574,7 @@ class YoutubeDL:
                 format_field(f, func=self.format_resolution, ignore=('audio only', 'images')),
                 format_field(f, 'fps', '\t%d', func=round),
                 format_field(f, 'dynamic_range', '%s', ignore=(None, 'SDR')).replace('HDR', ''),
+                format_field(f, 'audio_channels', '\t%s'),
                 delim,
                 format_field(f, 'filesize', ' \t%s', func=format_bytes) + format_field(f, 'filesize_approx', '~\t%s', func=format_bytes),
                 format_field(f, 'tbr', '\t%dk', func=round),
@@ -3611,7 +3594,7 @@ class YoutubeDL:
                     delim=' '),
             ] for f in formats if f.get('preference') is None or f['preference'] >= -1000]
         header_line = self._list_format_headers(
-            'ID', 'EXT', 'RESOLUTION', '\tFPS', 'HDR', delim, '\tFILESIZE', '\tTBR', 'PROTO',
+            'ID', 'EXT', 'RESOLUTION', '\tFPS', 'HDR', 'CH', delim, '\tFILESIZE', '\tTBR', 'PROTO',
             delim, 'VCODEC', '\tVBR', 'ACODEC', '\tABR', '\tASR', 'MORE INFO')
 
         return render_table(
@@ -3696,6 +3679,8 @@ class YoutubeDL:
             write_debug = lambda msg: self._write_string(f'[debug] {msg}\n')
 
         source = detect_variant()
+        if VARIANT not in (None, 'pip'):
+            source += '*'
         write_debug(join_nonempty(
             'yt-dlp version', __version__,
             f'[{RELEASE_GIT_HEAD}]' if RELEASE_GIT_HEAD else '',
