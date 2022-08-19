@@ -301,7 +301,7 @@ class YoutubeDL:
                        should act on each input URL as opposed to for the entire queue
     cookiefile:        File name or text stream from where cookies should be read and dumped to
     cookiesfrombrowser:  A tuple containing the name of the browser, the profile
-                       name/pathfrom where cookies are loaded, and the name of the
+                       name/path from where cookies are loaded, and the name of the
                        keyring, e.g. ('chrome', ) or ('vivaldi', 'default', 'BASICTEXT')
     legacyserverconnect: Explicitly allow HTTPS connection to servers that do not
                        support RFC 5746 secure renegotiation
@@ -444,6 +444,7 @@ class YoutubeDL:
                        * index: Section number (Optional)
     force_keyframes_at_cuts: Re-encode the video when downloading ranges to get precise cuts
     noprogress:        Do not print the progress bar
+    live_from_start:   Whether to download livestreams videos from the start
 
     The following parameters are not used by YoutubeDL itself, they are used by
     the downloader (see yt_dlp/downloader/common.py):
@@ -3443,7 +3444,7 @@ class YoutubeDL:
             return False
 
         vid_ids = [self._make_archive_id(info_dict)]
-        vid_ids.extend(info_dict.get('_old_archive_ids', []))
+        vid_ids.extend(info_dict.get('_old_archive_ids') or [])
         return any(id_ in self.archive for id_ in vid_ids)
 
     def record_download_archive(self, info_dict):
